@@ -1,0 +1,52 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: multidb-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - ./docker/mysql/dumps:/docker-entrypoint-initdb.d:ro
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "13306:3306"
+
+  adminer:
+    image: adminer
+    container_name: multidb-adminer
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    depends_on:
+      - mysql
+
+  backend:
+    build: ./backend
+    container_name: multidb-backend
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASS=rootpass
+      - DB_DEFAULT_SCHEMA=ingenieria
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+
+  frontend:
+    build: ./frontend
+    container_name: multidb-frontend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules        # ← ESTA LÍNEA ES CLAVE
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
