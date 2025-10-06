@@ -42,26 +42,72 @@ def inscritos_por_ciclo(programa_like: str = "AEROESPACIAL"):
     return db.q(sql, programa=f"%{programa_like}%")
 
 @router.get("/reprobacion")
-def indice_reprobacion(programa_like: str = "AEROESPACIAL", aprobatoria: float = 70.0):
+def indice_reprobacion(
+    programa_like: str = "AEROESPACIAL",
+    aprobatoria: float = 70.0,
+    contar_no_numericas: bool = False,   # NP/NA como reprobadas
+):
     """
-    Índice de reprobación por ciclo: porcentaje de calificación < aprobatoria.
+    Índice de reprobación por ciclo con autodetección de escala:
+    - Si max(calif) <= 1.0  -> umbral = aprobatoria/100   (p.ej., 0.70)
+    - Si max(calif) <= 10.0 -> umbral = aprobatoria/10    (p.ej., 7.0)
+    - En otro caso          -> umbral = aprobatoria       (p.ej., 70)
+    Solo usa calificaciones NUMÉRICAS para el denominador.
     """
     sql = """
-    WITH base AS (
-        SELECT b.ciclo,
-               COUNT(*) AS total,
-               SUM(CASE WHEN b.calificacion < :aprobatoria THEN 1 ELSE 0 END) AS reprobados
-        FROM estadistica.boletas b
-        WHERE b.carrera LIKE :programa
-        GROUP BY b.ciclo
+    WITH datos AS (
+      SELECT
+        b.ciclo,
+        TRIM(b.calificacion) AS calif_txt,
+        CASE
+          WHEN b.calificacion REGEXP '^[0-9]+(\\.[0-9]+)?$'
+          THEN CAST(b.calificacion AS DECIMAL(10,2))
+          ELSE NULL
+        END AS calif_num
+      FROM estadistica.boletas b
+      LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
+      WHERE UPPER(COALESCE(b.carrera, a.desc_programa, '')) LIKE :programa
+    ),
+    escala AS (
+      SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM datos
+    ),
+    params AS (
+      SELECT CASE
+               WHEN max_val <= 1.0  THEN :aprobatoria/100.0
+               WHEN max_val <= 10.0 THEN :aprobatoria/10.0
+               ELSE :aprobatoria
+             END AS aprob_calc
+      FROM escala
+    ),
+    marcaje AS (
+      SELECT
+        d.ciclo,
+        (d.calif_num IS NOT NULL) AS es_numerica,
+        CASE
+          WHEN d.calif_num IS NOT NULL AND d.calif_num < p.aprob_calc THEN 1
+          WHEN d.calif_num IS NULL AND :inc_non_num = 1 THEN 1
+          ELSE 0
+        END AS es_reprobado
+      FROM datos d
+      CROSS JOIN params p
     )
-    SELECT ciclo,
-           total,
-           reprobados,
-           ROUND(100.0*reprobados/NULLIF(total,0),2) AS porcentaje_reprobacion
-    FROM base ORDER BY ciclo
+    SELECT
+      ciclo,
+      SUM(es_numerica) AS evaluadas,
+      SUM(es_reprobado) AS reprobados,
+      ROUND(100.0 * SUM(es_reprobado) / NULLIF(SUM(es_numerica),0), 2) AS porcentaje_reprobacion,
+      (SELECT aprob_calc FROM params) AS umbral_usado
+    FROM marcaje
+    GROUP BY ciclo
+    ORDER BY ciclo;
     """
-    return db.q(sql, programa=f"%{programa_like}%", aprobatoria=aprobatoria)
+    inc_non_num = 1 if contar_no_numericas else 0
+    return db.q(
+        sql,
+        programa=f"%{programa_like.upper()}%",
+        aprobatoria=aprobatoria,
+        inc_non_num=inc_non_num,
+    )
 
 @router.get("/desercion")
 def desercion(programa_like: str = "AEROESPACIAL"):
