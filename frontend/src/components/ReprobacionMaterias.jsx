@@ -6,11 +6,18 @@ const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 // ordena ENE/JUN antes que AGO/DIC dentro del mismo año
 function cicloKey(c) {
-  // Ej: "2022-SEM-AGO/DIC" o "2015-SEM-ENE/JUN"
   const m = String(c).match(/^(\d{4}).*?(ENE\/JUN|AGO\/DIC)/i)
   const year = m ? parseInt(m[1], 10) : 0
   const sem  = m && m[2] ? (m[2].toUpperCase().includes('ENE') ? 1 : 2) : 0
   return year * 10 + sem
+}
+
+// Normaliza strings para agrupar nombres equivalentes
+function normalizeName(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita acentos
+    .trim().replace(/\s+/g, ' ')                      // espacios
+    .toUpperCase()
 }
 
 export default function ReprobacionMaterias({
@@ -24,9 +31,9 @@ export default function ReprobacionMaterias({
   const [rows, setRows]     = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
-  const [soloConReprob, setSoloConReprob] = useState(false) // mostrar 0% si está en false
+  const [soloConReprob, setSoloConReprob] = useState(false)
 
-  // Cargar ciclos detectados (a partir de inscritos_por_ciclo)
+  // Cargar ciclos detectados
   useEffect(() => {
     let cancel = false
     ;(async () => {
@@ -34,8 +41,7 @@ export default function ReprobacionMaterias({
         const r = await axios.get(`${API}/api/inscritos_por_ciclo`, {
           params: { programa_like: programa }
         })
-        // ordenar por año y semestre (ENE/JUN < AGO/DIC), y dejar el más reciente seleccionado
-        const list = [...r.data]
+        const list = [...(r.data || [])]
           .map(x => x.ciclo)
           .filter((v, i, arr) => v && arr.indexOf(v) === i)
           .sort((a, b) => cicloKey(a) - cicloKey(b))
@@ -43,19 +49,19 @@ export default function ReprobacionMaterias({
         if (!cancel) {
           setCiclos(list)
           if (!cicloDefault && list.length) {
-            setCiclo(list[list.length - 1]) // último = más reciente
+            setCiclo(list[list.length - 1]) // más reciente
           } else if (cicloDefault) {
             setCiclo(cicloDefault)
           }
         }
-      } catch (e) {
+      } catch {
         if (!cancel) setError('No se pudieron cargar los ciclos')
       }
     })()
     return () => { cancel = true }
   }, [programa, cicloDefault])
 
-  // Cargar detalle por materia del ciclo seleccionado
+  // Cargar detalle por materia
   useEffect(() => {
     if (!ciclo) return
     let cancel = false
@@ -64,26 +70,21 @@ export default function ReprobacionMaterias({
     ;(async () => {
       try {
         const r = await axios.get(`${API}/api/reprobacion_detalle`, {
-          params: {
-            programa_like: programa,
-            ciclo,
-            aprobatoria
-          }
+          params: { programa_like: programa, ciclo, aprobatoria }
         })
         if (cancel) return
-        // Normalizar claves para no lidiar con espacios en nombres de campos
         const norm = (r.data || []).map(x => ({
           clave: x['Clave'] ?? x.clave,
           nombre: x['Nombre de la Materia'] ?? x.nombre,
           ciclo: x['Ciclo'] ?? x.ciclo,
           semestre: x['Semestre'] ?? x.semestre,
-          alumnos: x['No. Alumnos'] ?? x.alumnos,
-          reprobados: x['No. Reprobados'] ?? x.reprobados,
-          porcentaje: x['Porcentaje'] ?? x.porcentaje,
-          umbral_usado: x['umbral_usado'] ?? x.umbral_usado
+          alumnos: Number(x['No. Alumnos'] ?? x.alumnos) || 0,
+          reprobados: Number(x['No. Reprobados'] ?? x.reprobados) || 0,
+          porcentaje: Number(x['Porcentaje'] ?? x.porcentaje) || 0,
+          umbral_usado: Number(x['umbral_usado'] ?? x.umbral_usado ?? aprobatoria)
         }))
         setRows(norm)
-      } catch (e) {
+      } catch {
         setError('No se pudo cargar la reprobación por materia')
       } finally {
         if (!cancel) setLoading(false)
@@ -92,23 +93,63 @@ export default function ReprobacionMaterias({
     return () => { cancel = true }
   }, [programa, ciclo, aprobatoria])
 
+  // Umbral (si el backend lo devuelve por fila, tomamos el primero)
   const umbralUsado = useMemo(() => {
     if (!rows.length) return aprobatoria
-    // puede venir por fila; si son iguales, toma el primero
     return rows[0]?.umbral_usado ?? aprobatoria
   }, [rows, aprobatoria])
 
-  const shown = useMemo(() => {
-    let arr = [...rows]
-    if (soloConReprob) arr = arr.filter(r => Number(r.porcentaje) > 0)
-    // ordenar por % reprobación DESC, y luego por clave para estabilidad
-    arr.sort((a, b) => {
-      const d = (Number(b.porcentaje) || 0) - (Number(a.porcentaje) || 0)
+  // *** Consolidación por (clave + nombre normalizado) ***
+  const consolidadas = useMemo(() => {
+    const map = new Map()
+    for (const r of rows) {
+      const clave = String(r.clave || '').trim().toUpperCase()
+      const nombreNorm = normalizeName(r.nombre || '(SIN NOMBRE)')
+      const key = `${clave}|${nombreNorm}`
+
+      const prev = map.get(key) || {
+        clave,
+        nombre: nombreNorm,     // mostramos ya normalizado
+        ciclo: r.ciclo,
+        semestre: Number.isFinite(r.semestre) ? r.semestre : 0,
+        alumnos: 0,
+        reprobados: 0,
+        umbral_usado: r.umbral_usado
+      }
+
+      // Suma de métricas
+      prev.alumnos   += r.alumnos
+      prev.reprobados += r.reprobados
+
+      // Semestre: toma el menor si difiere
+      const sem = Number.isFinite(r.semestre) ? r.semestre : 0
+      prev.semestre = Math.min(prev.semestre ?? sem, sem)
+
+      map.set(key, prev)
+    }
+
+    // Recalcula porcentaje
+    const out = Array.from(map.values()).map(it => ({
+      ...it,
+      porcentaje: it.alumnos ? (100 * it.reprobados / it.alumnos) : 0
+    }))
+
+    // Orden: % desc, luego clave
+    out.sort((a, b) => {
+      const d = (b.porcentaje || 0) - (a.porcentaje || 0)
       if (d !== 0) return d
       return String(a.clave).localeCompare(String(b.clave))
     })
+
+    return out
+  }, [rows])
+
+  // Aplicar filtros / topN
+  const shown = useMemo(() => {
+    let arr = [...consolidadas]
+    if (soloConReprob) arr = arr.filter(r => Number(r.porcentaje) > 0)
     return topN ? arr.slice(0, topN) : arr
-  }, [rows, soloConReprob, topN])
+  }, [consolidadas, soloConReprob, topN])
 
   return (
     <div>
@@ -170,7 +211,7 @@ export default function ReprobacionMaterias({
             </tbody>
           </table>
           <div style={{marginTop:8, opacity:.7}}>
-            Mostrando {shown.length} materias {soloConReprob ? '(solo con % &gt; 0)' : ''}.
+            Mostrando {shown.length} materias {soloConReprob ? '(solo con % > 0)' : ''}.
           </div>
         </div>
       )}
