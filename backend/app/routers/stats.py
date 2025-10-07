@@ -4,6 +4,44 @@ from ..db import DB
 router = APIRouter()
 db = DB()
 
+# --- AUX: introspección de esquema / catálogo de materias --------------------
+def _table_exists(schema: str, table: str) -> bool:
+    rows = db.q("""
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = :s AND table_name = :t
+        LIMIT 1
+    """, s=schema, t=table)
+    return bool(rows)
+
+def _col_exists(schema: str, table: str, column: str) -> bool:
+    rows = db.q("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = :s AND table_name = :t AND column_name = :c
+        LIMIT 1
+    """, s=schema, t=table, c=column)
+    return bool(rows)
+
+def _materia_join_for(alias: str = "d") -> tuple[str, str]:
+    """
+    Devuelve (join_sql, expr_nombre) para obtener el nombre de la materia.
+    Prioriza 'ingenieria.materias' y luego 'estadistica.materias'.
+    Si no existe catálogo, regresa ('', 'NULL').
+    """
+    # 1) ingenieria.materias (clave, nombre|asignatura)
+    if _table_exists("ingenieria", "materias") and _col_exists("ingenieria", "materias", "clave"):
+        if _col_exists("ingenieria", "materias", "nombre"):
+            return (f"LEFT JOIN ingenieria.materias m ON m.clave = {alias}.clave", "m.nombre")
+        if _col_exists("ingenieria", "materias", "asignatura"):
+            return (f"LEFT JOIN ingenieria.materias m ON m.clave = {alias}.clave", "m.asignatura")
+
+    # 2) estadistica.materias (clave, nombre)
+    if _table_exists("estadistica", "materias") and _col_exists("estadistica", "materias", "clave"):
+        if _col_exists("estadistica", "materias", "nombre"):
+            return (f"LEFT JOIN estadistica.materias m ON m.clave = {alias}.clave", "m.nombre")
+
+    # 3) sin catálogo disponible
+    return ("", "NULL")
+
 @router.get("/health")
 def health():
     # Simple query to ensure connection OK (list databases)
@@ -44,62 +82,68 @@ def inscritos_por_ciclo(programa_like: str = "AEROESPACIAL"):
 @router.get("/reprobacion")
 def indice_reprobacion(
     programa_like: str = "AEROESPACIAL",
-    aprobatoria: float = 70.0,
-    contar_no_numericas: bool = False,   # NP/NA como reprobadas
+    aprobatoria: float = 6.0,
+    contar_no_numericas: bool = False,  # si TRUE, NP/NA cuentan como reprobadas
 ):
     """
-    Índice de reprobación por ciclo con autodetección de escala:
-    - Si max(calif) <= 1.0  -> umbral = aprobatoria/100   (p.ej., 0.70)
-    - Si max(calif) <= 10.0 -> umbral = aprobatoria/10    (p.ej., 7.0)
-    - En otro caso          -> umbral = aprobatoria       (p.ej., 70)
-    Solo usa calificaciones NUMÉRICAS para el denominador.
+    Índice de reprobación por ciclo usando la MEJOR calificación por (matrícula, clave, ciclo).
+    Normaliza 'aprobatoria' a la escala detectada:
+      - max<=1.0  -> si aprobatoria>1 => /100; si <=1 => tal cual
+      - max<=10.0 -> si aprobatoria>10 => /10; si <=10 => tal cual
+      - max>10.0  -> aprobatoria tal cual
     """
-    sql = """
-    WITH datos AS (
+    sql = r"""
+    WITH base AS (
       SELECT
+        b.matricula,
+        b.clave,
         b.ciclo,
         TRIM(b.calificacion) AS calif_txt,
-        CASE
-          WHEN b.calificacion REGEXP '^[0-9]+(\\.[0-9]+)?$'
-          THEN CAST(b.calificacion AS DECIMAL(10,2))
-          ELSE NULL
-        END AS calif_num
+        CASE WHEN b.calificacion REGEXP '^[0-9]+(\\.[0-9]+)?$'
+             THEN CAST(b.calificacion AS DECIMAL(10,2))
+             ELSE NULL END AS calif_num
       FROM estadistica.boletas b
       LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
       WHERE UPPER(COALESCE(b.carrera, a.desc_programa, '')) LIKE :programa
     ),
     escala AS (
-      SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM datos
+      SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM base
     ),
     params AS (
       SELECT CASE
-               WHEN max_val <= 1.0  THEN :aprobatoria/100.0
-               WHEN max_val <= 10.0 THEN :aprobatoria/10.0
+               WHEN max_val <= 1.0 THEN CASE WHEN :aprobatoria > 1.0 THEN :aprobatoria/100.0 ELSE :aprobatoria END
+               WHEN max_val <= 10.0 THEN CASE WHEN :aprobatoria > 10.0 THEN :aprobatoria/10.0 ELSE :aprobatoria END
                ELSE :aprobatoria
              END AS aprob_calc
       FROM escala
     ),
-    marcaje AS (
+    final_alumno_materia AS (  -- mejor intento por alumno-materia-ciclo
       SELECT
-        d.ciclo,
-        (d.calif_num IS NOT NULL) AS es_numerica,
-        CASE
-          WHEN d.calif_num IS NOT NULL AND d.calif_num < p.aprob_calc THEN 1
-          WHEN d.calif_num IS NULL AND :inc_non_num = 1 THEN 1
-          ELSE 0
-        END AS es_reprobado
-      FROM datos d
-      CROSS JOIN params p
+        matricula, clave, ciclo,
+        MAX(calif_num) AS calif_final
+      FROM base
+      GROUP BY matricula, clave, ciclo
     )
     SELECT
-      ciclo,
-      SUM(es_numerica) AS evaluadas,
-      SUM(es_reprobado) AS reprobados,
-      ROUND(100.0 * SUM(es_reprobado) / NULLIF(SUM(es_numerica),0), 2) AS porcentaje_reprobacion,
+      f.ciclo AS ciclo,
+      SUM(CASE WHEN f.calif_final IS NOT NULL THEN 1 ELSE 0 END) AS evaluadas,
+      SUM(CASE
+            WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1
+            WHEN f.calif_final IS NULL AND :inc_non_num = 1 THEN 1
+            ELSE 0
+          END) AS reprobados,
+      ROUND(
+        100.0 * SUM(CASE
+                      WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1
+                      WHEN f.calif_final IS NULL AND :inc_non_num = 1 THEN 1
+                      ELSE 0
+                    END)
+        / NULLIF(SUM(CASE WHEN f.calif_final IS NOT NULL THEN 1 ELSE 0 END), 0), 2
+      ) AS porcentaje_reprobacion,
       (SELECT aprob_calc FROM params) AS umbral_usado
-    FROM marcaje
-    GROUP BY ciclo
-    ORDER BY ciclo;
+    FROM final_alumno_materia f
+    GROUP BY f.ciclo
+    ORDER BY f.ciclo;
     """
     inc_non_num = 1 if contar_no_numericas else 0
     return db.q(
@@ -160,3 +204,82 @@ def cedula_322(programa_like: str = "AEROESPACIAL"):
     ORDER BY genero, estatus
     """
     return db.q(sql, programa=f"%{programa_like}%")
+
+@router.get("/reprobacion_detalle")
+def reprobacion_detalle(
+    programa_like: str = "AEROESPACIAL",
+    aprobatoria: float = 6.0,
+    ciclo: str | None = None,   # p.ej. "2022-SEM-AGO/DIC"
+):
+    """
+    Detalle por materia dentro de cada ciclo, usando la MEJOR calificación por (matrícula, clave, ciclo).
+    Devuelve: Clave, Nombre de la Materia, Ciclo, Semestre (num), No. Alumnos, No. Reprobados, Porcentaje, umbral_usado.
+    """
+    sql = r"""
+    WITH base AS (
+      SELECT
+        b.matricula,
+        b.clave,
+        b.ciclo,
+        TRIM(b.grado) AS grado_txt,
+        CASE WHEN b.calificacion REGEXP '^[0-9]+(\\.[0-9]+)?$'
+             THEN CAST(b.calificacion AS DECIMAL(10,2))
+             ELSE NULL END AS calif_num
+      FROM estadistica.boletas b
+      LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
+      WHERE UPPER(COALESCE(b.carrera, a.desc_programa, '')) LIKE :programa
+        AND (:ciclo IS NULL OR b.ciclo = :ciclo)
+    ),
+    escala AS (
+      SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM base
+    ),
+    params AS (
+      SELECT CASE
+               WHEN max_val <= 1.0 THEN CASE WHEN :aprobatoria > 1.0 THEN :aprobatoria/100.0 ELSE :aprobatoria END
+               WHEN max_val <= 10.0 THEN CASE WHEN :aprobatoria > 10.0 THEN :aprobatoria/10.0 ELSE :aprobatoria END
+               ELSE :aprobatoria
+             END AS aprob_calc
+      FROM escala
+    ),
+    base_con_sem AS (
+      SELECT
+        matricula, clave, ciclo,
+        CASE
+          WHEN grado_txt REGEXP '^[0-9]+' THEN CAST(REGEXP_SUBSTR(grado_txt, '^[0-9]+') AS UNSIGNED)
+          ELSE 0
+        END AS semestre_n,
+        calif_num
+      FROM base
+    ),
+    final_alumno_materia AS (  -- mejor intento por alumno-materia-ciclo
+      SELECT
+        matricula, clave, ciclo,
+        MIN(semestre_n) AS semestre,      -- por si hay variaciones, tomamos el menor (suele ser constante)
+        MAX(calif_num)  AS calif_final
+      FROM base_con_sem
+      GROUP BY matricula, clave, ciclo
+    )
+    SELECT
+      f.clave                                        AS `Clave`,
+      COALESCE(m.materia, '(SIN NOMBRE)')            AS `Nombre de la Materia`,
+      f.ciclo                                        AS `Ciclo`,
+      f.semestre                                     AS `Semestre`,
+      COUNT(*)                                       AS `No. Alumnos`,
+      SUM(CASE WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1 ELSE 0 END)
+                                                   AS `No. Reprobados`,
+      ROUND(
+        100.0 * SUM(CASE WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1 ELSE 0 END)
+        / NULLIF(COUNT(*), 0), 1
+      )                                              AS `Porcentaje`,
+      (SELECT aprob_calc FROM params)                AS `umbral_usado`
+    FROM final_alumno_materia f
+    LEFT JOIN ingenieria.materias m ON m.clave = f.clave
+    GROUP BY f.clave, `Nombre de la Materia`, f.ciclo, f.semestre
+    ORDER BY f.ciclo, f.semestre, f.clave;
+    """
+    return db.q(
+        sql,
+        programa=f"%{programa_like.upper()}%",
+        aprobatoria=aprobatoria,
+        ciclo=ciclo,
+    )
