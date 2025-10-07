@@ -225,7 +225,6 @@ def cedula_322(programa_like: str = "AEROESPACIAL"):
     """
     return db.q(sql, programa=f"%{programa_like.upper()}%")
 
-# --- Reprobación por materia (detalle) ----------------------------------------
 @router.get("/reprobacion_detalle")
 def reprobacion_detalle(
     programa_like: str = "AEROESPACIAL",
@@ -233,8 +232,9 @@ def reprobacion_detalle(
     ciclo: str | None = None,   # p.ej. "2022-SEM-AGO/DIC"
 ):
     """
-    Detalle por materia dentro de cada ciclo, usando la MEJOR calificación por (matrícula, clave, ciclo).
-    Devuelve: Clave, Nombre de la Materia, Ciclo, Semestre (num), No. Alumnos, No. Reprobados, Porcentaje, umbral_usado.
+    Detalle por materia consolidado por (clave, ciclo).
+    Usa la MEJOR calificación por (matrícula, clave, ciclo),
+    suma alumnos/reprobados y recalcula porcentaje.
     """
     sql = r"""
     WITH base AS (
@@ -275,33 +275,45 @@ def reprobacion_detalle(
     final_alumno_materia AS (  -- mejor intento por alumno-materia-ciclo
       SELECT
         matricula, clave, ciclo,
-        MIN(semestre_n) AS semestre,      -- por si hay variaciones, tomamos el menor (suele ser constante)
+        MIN(semestre_n) AS semestre,      -- si varía, tomamos el menor
         MAX(calif_num)  AS calif_final
       FROM base_con_sem
       GROUP BY matricula, clave, ciclo
+    ),
+    totales AS (  -- 1ª agregación por (clave,ciclo,semestre)
+      SELECT
+        f.clave, f.ciclo, f.semestre,
+        COUNT(*) AS alumnos,
+        SUM(CASE WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1 ELSE 0 END) AS reprobados
+      FROM final_alumno_materia f
+      GROUP BY f.clave, f.ciclo, f.semestre
+    ),
+    consolidados AS (  -- 2ª agregación: colapsa por (clave,ciclo)
+      SELECT
+        t.clave, t.ciclo,
+        MIN(t.semestre) AS semestre,
+        SUM(t.alumnos) AS alumnos,
+        SUM(t.reprobados) AS reprobados
+      FROM totales t
+      GROUP BY t.clave, t.ciclo
     )
     SELECT
-      f.clave                                        AS `Clave`,
-      COALESCE(m.materia, '(SIN NOMBRE)')            AS `Nombre de la Materia`,
-      f.ciclo                                        AS `Ciclo`,
-      f.semestre                                     AS `Semestre`,
-      COUNT(*)                                       AS `No. Alumnos`,
-      SUM(CASE WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1 ELSE 0 END)
-                                                   AS `No. Reprobados`,
-      ROUND(
-        100.0 * SUM(CASE WHEN f.calif_final IS NOT NULL AND f.calif_final < (SELECT aprob_calc FROM params) THEN 1 ELSE 0 END)
-        / NULLIF(COUNT(*), 0), 1
-      )                                              AS `Porcentaje`,
-      (SELECT aprob_calc FROM params)                AS `umbral_usado`
-    FROM final_alumno_materia f
-    LEFT JOIN ingenieria.materias m ON m.clave = f.clave
-    GROUP BY f.clave, `Nombre de la Materia`, f.ciclo, f.semestre
+      c.clave                                              AS `Clave`,
+      COALESCE(NULLIF(TRIM(m.materia),''), '(SIN NOMBRE)') AS `Nombre de la Materia`,
+      c.ciclo                                              AS `Ciclo`,
+      c.semestre                                           AS `Semestre`,
+      c.alumnos                                            AS `No. Alumnos`,
+      c.reprobados                                         AS `No. Reprobados`,
+      ROUND(100.0 * c.reprobados / NULLIF(c.alumnos, 0), 1) AS `Porcentaje`,
+      (SELECT aprob_calc FROM params)                      AS `umbral_usado`
+    FROM consolidados c
+    LEFT JOIN ingenieria.materias m ON m.clave = c.clave
     ORDER BY
-      CAST(SUBSTRING_INDEX(f.ciclo,'-',1) AS UNSIGNED),
-      CASE WHEN f.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
-      f.ciclo,
-      f.semestre,
-      f.clave;
+      CAST(SUBSTRING_INDEX(c.ciclo,'-',1) AS UNSIGNED),
+      CASE WHEN c.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      c.ciclo,
+      `Porcentaje` DESC,
+      c.clave;
     """
     return db.q(
         sql,
