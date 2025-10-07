@@ -1,6 +1,6 @@
 // src/pages/ReprobacionPorMateria.jsx
 import React from 'react'
-import ReprobacionMaterias from '../components/ReprobacionMaterias' // ajusta si cambiaste la ruta
+import ReprobacionMaterias from '../components/ReprobacionMaterias'
 
 export default function ReprobacionPorMateria() {
   return (
@@ -9,7 +9,14 @@ export default function ReprobacionPorMateria() {
       <p style={{ marginTop: -6, opacity: 0.7 }}>
         Vista por materia en un ciclo; ordenada por % de reprobación.
       </p>
-      <ReprobacionMaterias programa="AEROESPACIAL" aprobatoria={6} topN={30} />
+
+      {/* Puedes fijar por defecto el ciclo que quieres validar */}
+      <ReprobacionMaterias
+        programa="AEROESPACIAL"
+        aprobatoria={6.0}
+        topN={0}                 // 0 = sin límite
+        cicloDefault="2022-SEM-AGO/DIC"
+      />
     </div>
   )
 }

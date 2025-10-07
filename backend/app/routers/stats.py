@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from ..db import DB
 
 router = APIRouter()
 db = DB()
 
-# --- AUX: introspección de esquema / catálogo de materias --------------------
+# --- Auxiliares de introspección (opcionales) --------------------------------
 def _table_exists(schema: str, table: str) -> bool:
     rows = db.q("""
         SELECT 1 FROM information_schema.tables
@@ -21,73 +21,81 @@ def _col_exists(schema: str, table: str, column: str) -> bool:
     """, s=schema, t=table, c=column)
     return bool(rows)
 
-def _materia_join_for(alias: str = "d") -> tuple[str, str]:
-    """
-    Devuelve (join_sql, expr_nombre) para obtener el nombre de la materia.
-    Prioriza 'ingenieria.materias' y luego 'estadistica.materias'.
-    Si no existe catálogo, regresa ('', 'NULL').
-    """
-    # 1) ingenieria.materias (clave, nombre|asignatura)
-    if _table_exists("ingenieria", "materias") and _col_exists("ingenieria", "materias", "clave"):
-        if _col_exists("ingenieria", "materias", "nombre"):
-            return (f"LEFT JOIN ingenieria.materias m ON m.clave = {alias}.clave", "m.nombre")
-        if _col_exists("ingenieria", "materias", "asignatura"):
-            return (f"LEFT JOIN ingenieria.materias m ON m.clave = {alias}.clave", "m.asignatura")
+# --- Debug: columnas relevantes ------------------------------------------------
+@router.get("/debug/cols_boletas")
+def debug_cols_boletas():
+    return {
+        "estadistica.boletas": [r["COLUMN_NAME"] for r in db.q("""
+            SELECT COLUMN_NAME
+            FROM information_schema.columns
+            WHERE table_schema='estadistica' AND table_name='boletas'
+            ORDER BY ORDINAL_POSITION
+        """)],
+        "ingenieria.alumnos": [r["COLUMN_NAME"] for r in db.q("""
+            SELECT COLUMN_NAME
+            FROM information_schema.columns
+            WHERE table_schema='ingenieria' AND table_name='alumnos'
+            ORDER BY ORDINAL_POSITION
+        """)],
+    }
 
-    # 2) estadistica.materias (clave, nombre)
-    if _table_exists("estadistica", "materias") and _col_exists("estadistica", "materias", "clave"):
-        if _col_exists("estadistica", "materias", "nombre"):
-            return (f"LEFT JOIN estadistica.materias m ON m.clave = {alias}.clave", "m.nombre")
-
-    # 3) sin catálogo disponible
-    return ("", "NULL")
-
+# --- Salud --------------------------------------------------------------------
 @router.get("/health")
 def health():
-    # Simple query to ensure connection OK (list databases)
     rows = db.q("SHOW DATABASES")
     return {"ok": True, "databases": [r["Database"] for r in rows]}
 
+# --- Metadatos ----------------------------------------------------------------
 @router.get("/meta/programas")
 def meta_programas(limit: int = 200):
     """
-    Programas educativos detectados (desde ingenieria.alumnos/desc_programa
-    y/o ingenieria.programas si existiera).
+    Programas educativos detectados, normalizados:
+      - Usa b.carrera si viene con valor (trim != '')
+      - En caso contrario usa a.desc_programa
+      - Se excluyen vacíos y se devuelve en UPPER()
     """
     sql = """
-    SELECT DISTINCT COALESCE(p.descripcion, a.desc_programa, 'SIN_PROGRAMA') AS programa
+    SELECT DISTINCT
+      UPPER(COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), 'SIN_PROGRAMA')) AS programa
     FROM estadistica.boletas b
     LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
-    LEFT JOIN ingenieria.programas p ON p.id_programa = a.id_programa
+    WHERE COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), '') <> ''
     ORDER BY 1
     LIMIT :limit
     """
     return db.q(sql, limit=limit)
 
+# --- Inscritos ----------------------------------------------------------------
 @router.get("/inscritos_por_ciclo")
 def inscritos_por_ciclo(programa_like: str = "AEROESPACIAL"):
     """
-    Inscritos por ciclo usando boletas.ciclo y filtro por carrera/programa.
+    Inscritos por ciclo; filtro robusto de programa y orden ENE/JUN antes que AGO/DIC.
     """
     sql = """
-    SELECT b.ciclo,
-           COUNT(DISTINCT b.matricula) AS inscritos
+    SELECT
+      b.ciclo,
+      COUNT(DISTINCT b.matricula) AS inscritos
     FROM estadistica.boletas b
-    WHERE b.carrera LIKE :programa
+    LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
+    WHERE UPPER(COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), '')) LIKE :programa
     GROUP BY b.ciclo
-    ORDER BY b.ciclo
+    ORDER BY
+      CAST(SUBSTRING_INDEX(b.ciclo,'-',1) AS UNSIGNED),                 -- año
+      CASE WHEN b.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,              -- semestre
+      b.ciclo
     """
-    return db.q(sql, programa=f"%{programa_like}%")
+    return db.q(sql, programa=f"%{programa_like.upper()}%")
 
+# --- Reprobación (por ciclo) --------------------------------------------------
 @router.get("/reprobacion")
 def indice_reprobacion(
     programa_like: str = "AEROESPACIAL",
     aprobatoria: float = 6.0,
-    contar_no_numericas: bool = False,  # si TRUE, NP/NA cuentan como reprobadas
+    contar_no_numericas: bool = False,   # si TRUE, NP/NA cuentan como reprobadas
 ):
     """
     Índice de reprobación por ciclo usando la MEJOR calificación por (matrícula, clave, ciclo).
-    Normaliza 'aprobatoria' a la escala detectada:
+    Normalización del umbral 'aprobatoria' a la escala detectada:
       - max<=1.0  -> si aprobatoria>1 => /100; si <=1 => tal cual
       - max<=10.0 -> si aprobatoria>10 => /10; si <=10 => tal cual
       - max>10.0  -> aprobatoria tal cual
@@ -104,7 +112,7 @@ def indice_reprobacion(
              ELSE NULL END AS calif_num
       FROM estadistica.boletas b
       LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
-      WHERE UPPER(COALESCE(b.carrera, a.desc_programa, '')) LIKE :programa
+      WHERE UPPER(COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), '')) LIKE :programa
     ),
     escala AS (
       SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM base
@@ -143,7 +151,10 @@ def indice_reprobacion(
       (SELECT aprob_calc FROM params) AS umbral_usado
     FROM final_alumno_materia f
     GROUP BY f.ciclo
-    ORDER BY f.ciclo;
+    ORDER BY
+      CAST(SUBSTRING_INDEX(f.ciclo,'-',1) AS UNSIGNED),
+      CASE WHEN f.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      f.ciclo;
     """
     inc_non_num = 1 if contar_no_numericas else 0
     return db.q(
@@ -153,6 +164,7 @@ def indice_reprobacion(
         inc_non_num=inc_non_num,
     )
 
+# --- Deserción (aprox) --------------------------------------------------------
 @router.get("/desercion")
 def desercion(programa_like: str = "AEROESPACIAL"):
     """
@@ -166,12 +178,16 @@ def desercion(programa_like: str = "AEROESPACIAL"):
            COUNT(*) AS total,
            ROUND(100.0*SUM(CASE WHEN UPPER(COALESCE(a.estatus,'')) REGEXP 'BAJA|INACT' THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0),2) AS porcentaje
     FROM ingenieria.alumnos a
-    WHERE a.desc_programa LIKE :programa
+    WHERE UPPER(COALESCE(NULLIF(TRIM(a.desc_programa),''), '')) LIKE :programa
     GROUP BY COALESCE(a.ultimo_ciclo_kardex, a.ciclo_ingreso)
-    ORDER BY ciclo
+    ORDER BY
+      CAST(SUBSTRING_INDEX(COALESCE(a.ultimo_ciclo_kardex, a.ciclo_ingreso),'-',1) AS UNSIGNED),
+      CASE WHEN COALESCE(a.ultimo_ciclo_kardex, a.ciclo_ingreso) LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      COALESCE(a.ultimo_ciclo_kardex, a.ciclo_ingreso)
     """
-    return db.q(sql, programa=f"%{programa_like}%")
+    return db.q(sql, programa=f"%{programa_like.upper()}%")
 
+# --- Cohorte ------------------------------------------------------------------
 @router.get("/cohorte")
 def seguimiento_cohorte(ciclo_ingreso: str, programa_like: str = "AEROESPACIAL"):
     """
@@ -182,29 +198,34 @@ def seguimiento_cohorte(ciclo_ingreso: str, programa_like: str = "AEROESPACIAL")
     FROM estadistica.boletas b
     JOIN ingenieria.alumnos a ON a.matricula=b.matricula
     WHERE a.ciclo_ingreso = :ciclo_ingreso
-      AND a.desc_programa LIKE :programa
+      AND UPPER(COALESCE(NULLIF(TRIM(a.desc_programa),''), '')) LIKE :programa
     GROUP BY b.ciclo
-    ORDER BY b.ciclo
+    ORDER BY
+      CAST(SUBSTRING_INDEX(b.ciclo,'-',1) AS UNSIGNED),
+      CASE WHEN b.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      b.ciclo
     """
-    return db.q(sql, ciclo_ingreso=ciclo_ingreso, programa=f"%{programa_like}%")
+    return db.q(sql, ciclo_ingreso=ciclo_ingreso, programa=f"%{programa_like.upper()}%")
 
+# --- Cédula 322 (placeholder) -------------------------------------------------
 @router.get("/cedula_322")
 def cedula_322(programa_like: str = "AEROESPACIAL"):
     """
-    Placeholder de Cédula 322 (estructura depende de fuente externa no incluida en dumps).
-    Devuelve conteos básicos por género y estatus.
+    Placeholder de Cédula 322 (estructura depende de fuente externa no incluida).
+    Conteos básicos por género y estatus.
     """
     sql = """
     SELECT UPPER(COALESCE(a.genero,'N/D')) AS genero,
            UPPER(COALESCE(a.estatus,'N/D')) AS estatus,
            COUNT(*) AS total
     FROM ingenieria.alumnos a
-    WHERE a.desc_programa LIKE :programa
+    WHERE UPPER(COALESCE(NULLIF(TRIM(a.desc_programa),''), '')) LIKE :programa
     GROUP BY UPPER(COALESCE(a.genero,'N/D')), UPPER(COALESCE(a.estatus,'N/D'))
     ORDER BY genero, estatus
     """
-    return db.q(sql, programa=f"%{programa_like}%")
+    return db.q(sql, programa=f"%{programa_like.upper()}%")
 
+# --- Reprobación por materia (detalle) ----------------------------------------
 @router.get("/reprobacion_detalle")
 def reprobacion_detalle(
     programa_like: str = "AEROESPACIAL",
@@ -227,8 +248,8 @@ def reprobacion_detalle(
              ELSE NULL END AS calif_num
       FROM estadistica.boletas b
       LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
-      WHERE UPPER(COALESCE(b.carrera, a.desc_programa, '')) LIKE :programa
-        AND (:ciclo IS NULL OR b.ciclo = :ciclo)
+      WHERE UPPER(COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), '')) LIKE :programa
+        AND ( :ciclo IS NULL OR :ciclo = '' OR b.ciclo = :ciclo )
     ),
     escala AS (
       SELECT COALESCE(MAX(calif_num), 0) AS max_val FROM base
@@ -275,7 +296,12 @@ def reprobacion_detalle(
     FROM final_alumno_materia f
     LEFT JOIN ingenieria.materias m ON m.clave = f.clave
     GROUP BY f.clave, `Nombre de la Materia`, f.ciclo, f.semestre
-    ORDER BY f.ciclo, f.semestre, f.clave;
+    ORDER BY
+      CAST(SUBSTRING_INDEX(f.ciclo,'-',1) AS UNSIGNED),
+      CASE WHEN f.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      f.ciclo,
+      f.semestre,
+      f.clave;
     """
     return db.q(
         sql,
