@@ -24,7 +24,8 @@ export default function ReprobacionMaterias({
   programa = 'AEROESPACIAL',
   aprobatoria = 6.0,
   topN = 30,
-  cicloDefault // opcional, ej: "2022-SEM-AGO/DIC"
+  cicloDefault, // opcional, ej: "2022-SEM-AGO/DIC"
+  onRowsChange, // <--- NUEVO
 }) {
   const [ciclos, setCiclos] = useState([])
   const [ciclo, setCiclo]   = useState(cicloDefault || '')
@@ -84,6 +85,24 @@ export default function ReprobacionMaterias({
           umbral_usado: Number(x['umbral_usado'] ?? x.umbral_usado ?? aprobatoria)
         }))
         setRows(norm)
+        // Consolidar duplicados por (clave, nombre, ciclo, semestre)
+        const map = new Map()
+        for (const r of norm) {
+          const key = [r.clave, r.nombre, r.ciclo, r.semestre].join('|')
+          const prev = map.get(key) || { ...r, alumnos: 0, reprobados: 0 }
+          prev.alumnos += Number(r.alumnos) || 0
+          prev.reprobados += Number(r.reprobados) || 0
+          map.set(key, prev)
+        }
+        const consolidados = Array.from(map.values()).map(r => ({
+          ...r,
+          porcentaje: r.alumnos ? (100 * r.reprobados / r.alumnos) : 0
+        }))
+
+        // Entregar los consolidados al padre (para gráficas)
+        if (typeof onRowsChange === 'function') {
+          onRowsChange(consolidados)
+        }
       } catch {
         setError('No se pudo cargar la reprobación por materia')
       } finally {

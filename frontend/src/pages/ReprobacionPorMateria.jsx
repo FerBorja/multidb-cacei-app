@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import ReprobacionMaterias from '../components/ReprobacionMaterias'
+import ReprobacionCharts from '../components/ReprobacionCharts'   // <--- NUEVO
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -10,13 +11,15 @@ export default function ReprobacionPorMateria() {
   const [loadingPg, setLoadingPg] = useState(true)
   const [errorPg, setErrorPg] = useState(null)
 
-  // Lee ?programa= del URL si viene
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), [])
   const programaInicial = urlParams.get('programa') || 'AEROESPACIAL'
 
   const [programaSel, setProgramaSel] = useState(programaInicial)
   const [topN, setTopN] = useState(0) // 0 = todos
-  const [aprobatoria, setAprobatoria] = useState(6) // 6.0 como pediste
+  const [aprobatoria, setAprobatoria] = useState(6)
+
+  // 👉 NUEVO: estado para gráficas (recibe desde la tabla)
+  const [rowsConsolidados, setRowsConsolidados] = useState([])
 
   useEffect(() => {
     setLoadingPg(true)
@@ -25,8 +28,6 @@ export default function ReprobacionPorMateria() {
       .then(res => {
         const lista = (res.data || []).map(r => (r.programa || '').trim()).filter(Boolean)
         setProgramas(lista)
-
-        // si el programa del URL no existe, usa el primero disponible
         if (!lista.includes(programaInicial) && lista.length > 0) {
           setProgramaSel(lista[0])
         }
@@ -35,7 +36,6 @@ export default function ReprobacionPorMateria() {
       .finally(() => setLoadingPg(false))
   }, [API])
 
-  // Mantén el query param sincronizado cuando cambia la selección
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     params.set('programa', programaSel)
@@ -104,11 +104,17 @@ export default function ReprobacionPorMateria() {
         </label>
       </div>
 
-      {/* Componente que pinta la tabla/gráfica */}
+      {/* 🔹 Dashboard de gráficas (usa los datos consolidados que entrega la tabla) */}
+      <div style={{ marginBottom: 24 }}>
+        <ReprobacionCharts rows={rowsConsolidados} topN={15} />
+      </div>
+
+      {/* Tabla (entrega los renglones consolidados al padre con onRowsChange) */}
       <ReprobacionMaterias
         programa={programaSel}
         aprobatoria={aprobatoria}
         topN={topN}
+        onRowsChange={setRowsConsolidados}   // <--- clave
       />
     </div>
   )
