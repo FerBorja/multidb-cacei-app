@@ -4,35 +4,27 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-// --- NUEVO: helper de ordenación por ciclo
-const cicloKey = (c) => {
-  const s = String(c || '').toUpperCase().trim()
-  const m = s.match(/^(\d{4})/)            // toma el año inicial (e.g. 2015 de "2015-SEM-ENE/JUN")
+function cicloKey(c) {
+  const m = String(c).match(/^(\d{4}).*?(ENE\/JUN|AGO\/DIC)/i)
   const year = m ? parseInt(m[1], 10) : 0
-  // ENE/JUN primero (1), AGO/DIC después (2)
-  let sem = 99
-  if (s.includes('ENE/JUN') || s.includes('ENE-JUN')) sem = 1
-  else if (s.includes('AGO/DIC') || s.includes('AGO-DIC')) sem = 2
-  return { year, sem }
+  const sem  = m && m[2] ? (m[2].toUpperCase().includes('ENE') ? 1 : 2) : 0
+  return year * 10 + sem
 }
 
-export default function Inscritos(){
+export default function Inscritos({ programa = 'AEROESPACIAL' }) {
   const [data, setData] = useState([])
-  useEffect(()=>{
-    axios.get(`${API}/api/inscritos_por_ciclo?programa_like=AEROESPACIAL`).then(r=>{
-      const sorted = [...r.data].sort((a, b) => {
-        const ak = cicloKey(a.ciclo)
-        const bk = cicloKey(b.ciclo)
-        if (ak.year !== bk.year) return ak.year - bk.year       // años ascendentes
-        if (ak.sem  !== bk.sem ) return ak.sem  - bk.sem        // ENE/JUN (1) antes que AGO/DIC (2)
-        return String(a.ciclo).localeCompare(String(b.ciclo))    // desempate
-      })
-      setData(sorted)
+
+  useEffect(() => {
+    axios.get(`${API}/api/inscritos_por_ciclo`, {
+      params: { programa_like: programa }
+    }).then(r => {
+      const ordered = [...r.data].sort((a,b)=> cicloKey(a.ciclo) - cicloKey(b.ciclo))
+      setData(ordered)
     })
-  },[])
+  }, [programa])
 
   return (
-    <div style={{marginTop:20}}>
+    <div style={{ marginTop: 20 }}>
       <h2>Inscritos por Ciclo</h2>
       <ResponsiveContainer width="100%" height={320}>
         <LineChart data={data}>
@@ -40,9 +32,10 @@ export default function Inscritos(){
           <XAxis dataKey="ciclo" />
           <YAxis />
           <Tooltip />
-          <Line type="monotone" dataKey="inscritos" dot={false}/>
+          <Line type="monotone" dataKey="inscritos" name="Inscritos" dot={false} stroke="#10B981" />
         </LineChart>
       </ResponsiveContainer>
+      <div style={{marginTop:8, opacity:.7}}>Programa: <b>{programa}</b></div>
     </div>
   )
 }

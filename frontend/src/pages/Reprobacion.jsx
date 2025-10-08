@@ -4,14 +4,17 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-export default function Reprobacion(){
+export default function Reprobacion({ programa = 'AEROESPACIAL', aprobatoria = 6 }) {
   const [data, setData] = useState([])
-  useEffect(()=>{
-    axios.get(`${API}/api/reprobacion?programa_like=AEROESPACIAL&aprobatoria=70`).then(r=>setData(r.data))
-  },[])
+
+  useEffect(() => {
+    axios.get(`${API}/api/reprobacion`, {
+      params: { programa_like: programa, aprobatoria }
+    }).then(r => setData(r.data))
+  }, [programa, aprobatoria])
 
   return (
-    <div style={{marginTop:20}}>
+    <div style={{ marginTop: 20 }}>
       <h2>Índice de Reprobación</h2>
       <ResponsiveContainer width="100%" height={320}>
         <BarChart data={data}>
@@ -19,9 +22,12 @@ export default function Reprobacion(){
           <XAxis dataKey="ciclo" />
           <YAxis />
           <Tooltip />
-          <Bar dataKey="porcentaje_reprobacion" />
+          <Bar dataKey="porcentaje_reprobacion" name="% reprobación" fill="#4F46E5" />
         </BarChart>
       </ResponsiveContainer>
+      <div style={{marginTop:8, opacity:.7}}>
+        Programa: <b>{programa}</b> · Aprobatoria solicitada: <b>{Number(aprobatoria).toFixed(1)}</b>
+      </div>
     </div>
   )
 }

@@ -2,7 +2,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import ReprobacionMaterias from '../components/ReprobacionMaterias'
-import ReprobacionCharts from '../components/ReprobacionCharts'   // <--- NUEVO
+import ReprobacionCharts from '../components/ReprobacionCharts'
+import { Link } from 'react-router-dom'   // ⬅️ NUEVO
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -18,7 +19,7 @@ export default function ReprobacionPorMateria() {
   const [topN, setTopN] = useState(0) // 0 = todos
   const [aprobatoria, setAprobatoria] = useState(6)
 
-  // 👉 NUEVO: estado para gráficas (recibe desde la tabla)
+  // 👉 estado para gráficas (recibe desde la tabla)
   const [rowsConsolidados, setRowsConsolidados] = useState([])
 
   useEffect(() => {
@@ -45,10 +46,22 @@ export default function ReprobacionPorMateria() {
 
   return (
     <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
-      <h1 style={{ marginBottom: 4 }}>CACEI · Reprobación por Materia</h1>
-      <p style={{ marginTop: 0, opacity: 0.75 }}>
-        Vista por materia en un ciclo; consolidada por clave y ordenada por % de reprobación.
-      </p>
+      {/* Título + link volver */}
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', gap:16 }}>
+        <div>
+          <h1 style={{ marginBottom: 4 }}>CACEI · Reprobación por Materia</h1>
+          <p style={{ marginTop: 0, opacity: 0.75 }}>
+            Vista por materia en un ciclo; consolidada por clave y ordenada por % de reprobación.
+          </p>
+        </div>
+        <Link
+          to={`/dashboard?programa=${encodeURIComponent(programaSel)}`}
+          style={{ textDecoration:'none', fontWeight:600 }}
+          title="Volver al dashboard"
+        >
+          ← Volver al dashboard
+        </Link>
+      </div>
 
       {/* Controles */}
       <div
@@ -104,7 +117,7 @@ export default function ReprobacionPorMateria() {
         </label>
       </div>
 
-      {/* 🔹 Dashboard de gráficas (usa los datos consolidados que entrega la tabla) */}
+      {/* Gráficas */}
       <div style={{ marginBottom: 24 }}>
         <ReprobacionCharts rows={rowsConsolidados} topN={15} />
       </div>
@@ -114,7 +127,7 @@ export default function ReprobacionPorMateria() {
         programa={programaSel}
         aprobatoria={aprobatoria}
         topN={topN}
-        onRowsChange={setRowsConsolidados}   // <--- clave
+        onRowsChange={setRowsConsolidados}
       />
     </div>
   )
