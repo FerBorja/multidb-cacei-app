@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import App from './pages/App.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import ReprobacionPorMateria from './pages/ReprobacionPorMateria.jsx'
+import Cedula322Page from './pages/Cedula322Page.jsx'
 
 createRoot(document.getElementById('root')).render(
   <BrowserRouter>
@@ -13,6 +14,7 @@ createRoot(document.getElementById('root')).render(
       <Route path="/reprobacion-materias" element={<ReprobacionPorMateria />} />
       {/* tu landing original si quieres conservarla */}
       <Route path="/demo" element={<App />} />
+      <Route path="/cedula322" element={<Cedula322Page />} />
     </Routes>
   </BrowserRouter>
 )

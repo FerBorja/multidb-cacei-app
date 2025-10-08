@@ -81,6 +81,16 @@ export default function Dashboard() {
       <div style={{ gridColumn: '1 / -1' }}>
         <CohorteResumen programa={programaSel} />
       </div>
+
+      <Divider />
+
+      <Link
+        to={`/cedula322?programa=${encodeURIComponent(programaSel)}`}
+        style={{ textDecoration:'none', fontWeight:600 }}
+      >
+        Ver Cédula 322 →
+      </Link>      
+
     </div>
   )
 }

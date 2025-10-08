@@ -513,3 +513,95 @@ def seguimiento_cohorte_resumen(
       re_tit=re_titulados.upper(),
       re_egr=re_egresados.upper(),
     )
+
+@router.get("/cedula_322_detalle")
+def cedula_322_detalle(
+    programa_like: str = "AEROESPACIAL",
+    ciclo: str | None = None,   # ej: "2022-SEM-AGO/DIC" (opcional)
+):
+    """
+    Cédula 322-like por materia y ciclo:
+      - Usa la MEJOR calificación numérica por (matrícula, clave, ciclo)
+      - Calcula promedio por materia/ciclo (AVG calif_final)
+      - Cuenta alumnos con calif_final >= promedio
+      - Devuelve: Clave, Materia, Ciclo, Semestre, No. Inscritos, Promedio, ArribaProm, Porcentaje
+    """
+    sql = r"""
+    WITH base AS (
+      SELECT
+        b.matricula,
+        b.clave,
+        b.ciclo,
+        TRIM(b.grado) AS grado_txt,
+        CASE
+          WHEN b.calificacion REGEXP '^[0-9]+(\.[0-9]+)?$'
+          THEN CAST(b.calificacion AS DECIMAL(10,2))
+          ELSE NULL
+        END AS calif_num
+      FROM estadistica.boletas b
+      LEFT JOIN ingenieria.alumnos a ON a.matricula = b.matricula
+      WHERE UPPER(COALESCE(NULLIF(TRIM(b.carrera),''), TRIM(a.desc_programa), '')) LIKE :programa
+        AND ( :ciclo IS NULL OR :ciclo = '' OR b.ciclo = :ciclo )
+    ),
+    base_sem AS (
+      SELECT
+        matricula,
+        clave,
+        ciclo,
+        CASE
+          WHEN grado_txt REGEXP '^[0-9]+'
+          THEN CAST(REGEXP_SUBSTR(grado_txt, '^[0-9]+') AS UNSIGNED)
+          ELSE 0
+        END AS semestre_n,
+        calif_num
+      FROM base
+    ),
+    final_alumno_materia AS (
+      -- Mejor calificación por alumno-materia-ciclo y el semestre "más bajo" observado
+      SELECT
+        matricula,
+        clave,
+        ciclo,
+        MIN(semestre_n) AS semestre,
+        MAX(calif_num)  AS calif_final
+      FROM base_sem
+      GROUP BY matricula, clave, ciclo
+    ),
+    stats AS (
+      -- Promedio y conteos por materia-ciclo
+      SELECT
+        f.clave,
+        f.ciclo,
+        MIN(f.semestre)           AS semestre,
+        COUNT(*)                  AS inscritos,
+        AVG(f.calif_final)        AS promedio
+      FROM final_alumno_materia f
+      GROUP BY f.clave, f.ciclo
+    )
+    SELECT
+      f.clave                                        AS `Clave`,
+      COALESCE(m.materia, '(SIN NOMBRE)')            AS `Materia`,
+      f.ciclo                                        AS `Ciclo`,
+      s.semestre                                     AS `Semestre`,
+      s.inscritos                                    AS `No. Inscritos`,
+      ROUND(s.promedio, 1)                           AS `Promedio`,
+      SUM(CASE WHEN f.calif_final >= s.promedio THEN 1 ELSE 0 END)
+                                                    AS `Arriba del promedio`,
+      ROUND(100.0 * SUM(CASE WHEN f.calif_final >= s.promedio THEN 1 ELSE 0 END) / NULLIF(s.inscritos,0), 1)
+                                                    AS `Porcentaje`
+    FROM final_alumno_materia f
+    JOIN stats s ON s.clave = f.clave AND s.ciclo = f.ciclo
+    LEFT JOIN ingenieria.materias m ON m.clave = f.clave
+    GROUP BY f.clave, `Materia`, f.ciclo, s.semestre, s.inscritos, s.promedio
+    ORDER BY
+      CAST(SUBSTRING_INDEX(f.ciclo,'-',1) AS UNSIGNED),
+      CASE WHEN f.ciclo LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      f.ciclo,
+      `Porcentaje` DESC,
+      `No. Inscritos` DESC;
+    """
+    return db.q(
+        sql,
+        programa=f"%{programa_like.upper()}%",
+        ciclo=ciclo,
+    )
