@@ -321,3 +321,70 @@ def reprobacion_detalle(
         aprobatoria=aprobatoria,
         ciclo=ciclo,
     )
+
+@router.get("/desercion_escolar")
+def desercion_escolar(
+    programa_like: str = "AEROESPACIAL",
+    restar_ri: int = 1,  # 1 = restar RI del total de deserción; 0 = no restar
+):
+    """
+    Deserción Escolar por cohorte (ciclo_ingreso) con desglose:
+      BD, BCPED, BCPES, BCM, BT, RI, Desercion, Porcentaje.
+    Mapea a.estatus usando patrones robustos (abreviado o texto completo).
+
+    Fórmula por defecto:
+      Desercion = BD + BCPED + BCPES + BCM + BT - (RI si restar_ri=1)
+      Porcentaje = 100 * Desercion / COUNT(*)
+    """
+    sql = r"""
+    WITH base AS (
+      SELECT
+        COALESCE(a.ciclo_ingreso, a.ultimo_ciclo_kardex) AS cohorte,
+        UPPER(COALESCE(TRIM(a.estatus), '')) AS estatus
+      FROM ingenieria.alumnos a
+      WHERE UPPER(COALESCE(NULLIF(TRIM(a.desc_programa),''), '')) LIKE :programa
+    ),
+    buckets AS (
+      SELECT
+        cohorte,
+        -- BD: BAJA DEFINITIVA o ' BD ' literal
+        SUM(CASE WHEN estatus REGEXP '(^|[^A-Z0-9])BD($|[^A-Z0-9])|BAJA[ ]+DEFINITIVA' THEN 1 ELSE 0 END) AS BD,
+        -- BCPED: BAJA POR CAMBIO DE PROGRAMA
+        SUM(CASE WHEN estatus REGEXP 'BCPED|CAMBIO[ ]+DE[ ]+PROGRAMA' THEN 1 ELSE 0 END) AS BCPED,
+        -- BCPES: BAJA POR CAMBIO DE PLAN
+        SUM(CASE WHEN estatus REGEXP 'BCPES|CAMBIO[ ]+DE[ ]+PLAN' THEN 1 ELSE 0 END) AS BCPES,
+        -- BCM: BAJA POR CAMBIO DE MODALIDAD
+        SUM(CASE WHEN estatus REGEXP '(^|[^A-Z0-9])BCM($|[^A-Z0-9])|CAMBIO[ ]+DE[ ]+MODALIDAD' THEN 1 ELSE 0 END) AS BCM,
+        -- BT: BAJA TEMPORAL
+        SUM(CASE WHEN estatus REGEXP '(^|[^A-Z0-9])BT($|[^A-Z0-9])|BAJA[ ]+TEMPORAL' THEN 1 ELSE 0 END) AS BT,
+        -- RI: REINGRESO INSCRITO
+        SUM(CASE WHEN estatus REGEXP '(^|[^A-Z0-9])RI($|[^A-Z0-9])|REINGRESO[ ]+INSCRITO' THEN 1 ELSE 0 END) AS RI,
+        COUNT(*) AS total_alumnos
+      FROM base
+      GROUP BY cohorte
+    )
+    SELECT
+      cohorte AS Cohorte,
+      BD, BCPED, BCPES, BCM, BT, RI,
+      GREATEST(
+        (BD + BCPED + BCPES + BCM + BT) - (CASE WHEN :restar_ri = 1 THEN RI ELSE 0 END),
+        0
+      ) AS Desercion,
+      ROUND(
+        100.0 * GREATEST(
+          (BD + BCPED + BCPES + BCM + BT) - (CASE WHEN :restar_ri = 1 THEN RI ELSE 0 END),
+          0
+        ) / NULLIF(total_alumnos, 0), 2
+      ) AS Porcentaje
+    FROM buckets
+    WHERE cohorte IS NOT NULL AND cohorte <> ''
+    ORDER BY
+      CAST(SUBSTRING_INDEX(cohorte,'-',1) AS UNSIGNED),
+      CASE WHEN cohorte LIKE '%ENE/JUN' THEN 1 ELSE 2 END,
+      cohorte;
+    """
+    return db.q(
+        sql,
+        programa=f"%{programa_like.upper()}%",
+        restar_ri=restar_ri,
+    )
